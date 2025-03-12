@@ -1,10 +1,10 @@
 import os
-import sqlite3
 import yaml
 import pandas as pd
-from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, Boolean
+from sqlalchemy import create_engine, Column, String, Integer, DateTime, Text, inspect
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.exc import OperationalError
 
 Base = declarative_base()
 
@@ -17,7 +17,7 @@ class Tweet(Base):
     tweet_id = Column(String, primary_key=True)
     raw_text = Column(Text, nullable=False)
     created_at = Column(DateTime, nullable=False)
-    user_id = Column(String, nullable=False)
+    user_id = Column(String, nullable=True)  # Changed to nullable=True
     username = Column(String, nullable=False)
     processed = Column(Integer, default=0)  # 0=not processed, 1=processed
     processed_text = Column(Text, nullable=True)
@@ -41,9 +41,20 @@ class Database:
             mysql_config = self.config["database"]["mysql"]
             db_url = f"mysql+pymysql://{mysql_config['username']}:{mysql_config['password']}@{mysql_config['host']}:{mysql_config['port']}/{mysql_config['database']}"
 
-        # Create engine and tables (adding checkfirst to prevent errors)
+        # Create engine and establish connection
         self.engine = create_engine(db_url)
-        Base.metadata.create_all(self.engine, checkfirst=True)
+
+        # Create table with explicit error handling
+        try:
+            # Try creating just the tweets table specifically rather than all tables
+            Tweet.__table__.create(self.engine, checkfirst=True)
+        except OperationalError as e:
+            # If the error is "table already exists", just ignore it
+            if "already exists" in str(e):
+                pass  # Table already exists, no action needed
+            else:
+                # If it's some other error, re-raise it
+                raise
 
         # Create session
         Session = sessionmaker(bind=self.engine)
@@ -52,6 +63,22 @@ class Database:
     def insert_tweet(self, tweet_data):
         """Insert a new tweet into the database."""
         try:
+            # Check if tweet with this ID already exists
+            existing = (
+                self.session.query(Tweet)
+                .filter_by(tweet_id=tweet_data["tweet_id"])
+                .first()
+            )
+            if existing:
+                # If this is a generic ID like 'news_', generate a unique one
+                if tweet_data["tweet_id"] == "news_":
+                    import uuid
+
+                    tweet_data["tweet_id"] = f"news_{uuid.uuid4()}"
+                else:
+                    # Skip insertion for existing tweets
+                    return True
+
             tweet = Tweet(**tweet_data)
             self.session.add(tweet)
             self.session.commit()
